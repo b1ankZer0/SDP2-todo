@@ -1,0 +1,1 @@
+pyinstaller --onefile --windowed --name="TodoApp" --hidden-import=tkcalendar --hidden-import=sqlite3 todo_app.py

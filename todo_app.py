@@ -133,48 +133,16 @@ class Database:
         )
         return self.cursor.fetchall()
     
-    # Modified: Include status in search results
-    def search_todos(self):
-        keyword = self.search_entry.get().strip()
-        if not keyword:
-            messagebox.showinfo("Info", "Please enter a search keyword")
-            return
-            
-        # Store the search keyword for possible reuse after deletion
-        self.last_search_keyword = keyword
-        self.in_search_mode = True  # Flag to indicate we're viewing search results
-            
-        # Clear existing items
-        for item in self.tree.get_children():
-            self.tree.delete(item)
-            
-        # Search todos
-        todos = self.db.search_todos(self.user_id, keyword)
-        if not todos:
-            messagebox.showinfo("Search Results", "No todos found matching your search")
-            return
-            
-        # Sort todos by date (most recent first)
-        todos = sorted(todos, key=lambda x: x[1], reverse=True)
-            
-        # Current date and time for checking overdue
-        now = datetime.datetime.now()
-        current_date = now.strftime("%Y-%m-%d")
-        current_time = now.strftime("%H:%M")
-        
-        # Display results
-        for todo in todos:
-            todo_id, date, title, description, status, due_time, priority = todo
-            
-            # Determine if task is overdue
-            tag = status
-            if status == 'pending' and (date < current_date or 
-                                    (date == current_date and due_time and due_time < current_time)):
-                tag = 'overdue'
-                
-            self.tree.insert("", "end", 
-                        values=(todo_id, date, title, description, status, due_time or "", priority), 
-                        tags=(tag, priority))
+    def search_todos(self, user_id, keyword):
+        search_pattern = f"%{keyword}%"
+        self.cursor.execute(
+            """SELECT id, date, title, description, status, due_time, priority 
+            FROM todos 
+            WHERE user_id = ? AND (title LIKE ? OR description LIKE ?)
+            ORDER BY date DESC, id DESC""",
+            (user_id, search_pattern, search_pattern)
+        )
+        return self.cursor.fetchall()
 
     # New: Method to get all todos sorted by priority
     def get_todos_by_priority(self, user_id):
@@ -609,7 +577,6 @@ class TodoApp(tk.Frame):
                     self.tooltip.show_tip(description)
                     return
         self.tooltip.hide_tip()
-
         
     def date_selected(self, event=None):
         selected_date = self.calendar.get_date()
@@ -621,6 +588,9 @@ class TodoApp(tk.Frame):
         for item in self.tree.get_children():
             self.tree.delete(item)
             
+        self.in_priority_view=False
+        self.in_search_mode=False
+        self.last_search_keyword=None
         # Load todos for the selected date
         todos = self.db.get_todos_by_date(self.user_id, date)
         
@@ -645,6 +615,52 @@ class TodoApp(tk.Frame):
         # Update statistics
         self.update_stats()
 
+    def search_todos(self):
+        keyword = self.search_entry.get().strip()
+        if not keyword:
+            messagebox.showinfo("Info", "Please enter a search keyword")
+            return
+            
+        # Store the search keyword for possible reuse after deletion
+        self.in_priority_view=False
+        self.in_search_mode = True
+        self.last_search_keyword = keyword
+            
+        # Clear existing items
+        for item in self.tree.get_children():
+            self.tree.delete(item)
+            
+        # Search todos
+        todos = self.db.search_todos(self.user_id, keyword)
+        if not todos:
+            messagebox.showinfo("Search Results", "No todos found matching your search")
+            return
+            
+        # Current date and time for checking overdue
+        now = datetime.datetime.now()
+        current_date = now.strftime("%Y-%m-%d")
+        current_time = now.strftime("%H:%M")
+        
+        # Display results
+        for todo in todos:
+            todo_id, date, title, description, status, due_time, priority = todo
+            
+            # Determine if task is overdue
+            tag = status
+            if status == 'pending' and (date < current_date or 
+                                    (date == current_date and due_time and due_time < current_time)):
+                tag = 'overdue'
+                
+            self.tree.insert("", "end", 
+                        values=(todo_id, date, title, description, status, due_time or "", priority), 
+                        tags=(tag, priority))
+    
+    def reset_search(self):
+        self.search_entry.delete(0, tk.END)
+        self.last_search_keyword = None
+        self.in_search_mode = False
+        self.load_todos_for_date(self.current_date)
+    
     def show_all_by_priority(self):
         """Display all pending todos sorted by priority"""
         # Clear existing items
@@ -653,6 +669,7 @@ class TodoApp(tk.Frame):
             
         # Set flag to indicate we're in priority view mode
         self.in_priority_view = True
+        self.in_search_mode=False
         self.last_search_keyword = None  # Clear any search keyword
             
         # Load all todos sorted by priority
@@ -696,14 +713,19 @@ class TodoApp(tk.Frame):
 
     def _refresh_current_view(self):
         """Helper method to refresh the current view after adding/editing/deleting todos"""
-        # After adding or updating a todo, we should always return to the selected date view
-        # Reset view mode flags
-        self.in_priority_view = False
-        self.in_search_mode = False
-        
-        # Load todos for the current date
-        self.load_todos_for_date(self.current_date)
-        
+        if self.in_priority_view:
+            # If we're in priority view, reload priority view
+            self.show_all_by_priority()
+        elif self.in_search_mode and self.last_search_keyword:
+            # If we're in search results, reload search
+            self.search_entry.delete(0, tk.END)
+            self.search_entry.insert(0, self.last_search_keyword)
+            self.search_todos()
+        else:
+            # Otherwise reload current date view
+            self.load_todos_for_date(self.current_date)
+
+
     def save_todo(self):
         print("Save button clicked")  # Debug line
         title = self.title_entry.get().strip()
@@ -760,7 +782,6 @@ class TodoApp(tk.Frame):
             else:
                 messagebox.showerror("Error", "Failed to add todo")
 
-    
     def validate_time_format(self, time_str):
         """Check if time string is in HH:MM format"""
         try:
@@ -810,7 +831,6 @@ class TodoApp(tk.Frame):
             # Change button text to indicate update mode
             self.save_btn.config(text="Update Todo")
     
-
     # New: Mark selected todo as done
     def mark_as_done(self):
         if not self.selected_todo_id:
@@ -854,50 +874,6 @@ class TodoApp(tk.Frame):
             else:
                 messagebox.showerror("Error", "Failed to delete todo")
     
-    def search_todos(self):
-        keyword = self.search_entry.get().strip()
-        if not keyword:
-            messagebox.showinfo("Info", "Please enter a search keyword")
-            return
-            
-        # Store the search keyword for possible reuse after deletion
-        self.last_search_keyword = keyword
-            
-        # Clear existing items
-        for item in self.tree.get_children():
-            self.tree.delete(item)
-            
-        # Search todos
-        todos = self.db.search_todos(self.user_id, keyword)
-        if not todos:
-            messagebox.showinfo("Search Results", "No todos found matching your search")
-            return
-            
-        # Current date and time for checking overdue
-        now = datetime.datetime.now()
-        current_date = now.strftime("%Y-%m-%d")
-        current_time = now.strftime("%H:%M")
-        
-        # Display results
-        for todo in todos:
-            todo_id, date, title, description, status, due_time, priority = todo
-            
-            # Determine if task is overdue
-            tag = status
-            if status == 'pending' and (date < current_date or 
-                                    (date == current_date and due_time and due_time < current_time)):
-                tag = 'overdue'
-                
-            self.tree.insert("", "end", 
-                        values=(todo_id, date, title, description, status, due_time or "", priority), 
-                        tags=(tag, priority))
-    
-    def reset_search(self):
-        self.search_entry.delete(0, tk.END)
-        self.last_search_keyword = None
-        self.in_search_mode = False
-        self.load_todos_for_date(self.current_date)
-    
     def logout(self):
         confirm = messagebox.askyesno("Confirm", "Are you sure you want to logout?")
         if confirm:
@@ -914,7 +890,7 @@ class ToolTip:
         if self.tip_window or not text:
             return
             
-        # Get cursor position for tooltip placement
+        # Get cursor position instead of using bbox("insert")
         x = self.widget.winfo_pointerx() + 15
         y = self.widget.winfo_pointery() + 10
         
@@ -933,6 +909,12 @@ class ToolTip:
         if self.tip_window:
             self.tip_window.destroy()
             self.tip_window = None
+        
+    def hide_tip(self):
+        """Hide the tooltip"""
+        if self.tip_window:
+            self.tip_window.destroy()
+            self.tip_window = None
 
 class Application(tk.Tk):
     def __init__(self):
@@ -941,10 +923,10 @@ class Application(tk.Tk):
         self.title("Todo App")
         
         # Set minimum size
-        self.minsize(1200, 600)
+        self.minsize(1100, 600)
         
         # Start with a somewhat larger window
-        self.geometry("1200x700")
+        self.geometry("1100x700")
         self.resizable(True, True)
         self.configure(bg="#f7f9f9")
         
